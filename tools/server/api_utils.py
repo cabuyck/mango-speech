@@ -40,6 +40,44 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--api-key", type=str, default=None)
 
+    # RPC-based layer offload arguments
+    parser.add_argument(
+        "--rpc-enable",
+        action="store_true",
+        help="Enable RPC-based layer offload mode",
+    )
+    parser.add_argument(
+        "--rpc-role",
+        type=str,
+        choices=["host", "vm"],
+        default="host",
+        help="Role for this instance: 'host' or 'vm' (default: host)",
+    )
+    parser.add_argument(
+        "--rpc-host-address",
+        type=str,
+        default="localhost:29500",
+        help="Address of the host machine for RPC (format: 'host:port', default: localhost:29500)",
+    )
+    parser.add_argument(
+        "--rpc-vm-address",
+        type=str,
+        default="localhost:29501",
+        help="Address of the VM worker for RPC (format: 'host:port', default: localhost:29501)",
+    )
+    parser.add_argument(
+        "--rpc-num-host-layers",
+        type=int,
+        default=16,
+        help="Number of transformer layers to run on host (default: 16)",
+    )
+    parser.add_argument(
+        "--rpc-timeout-ms",
+        type=int,
+        default=60000,
+        help="RPC timeout in milliseconds (default: 60000)",
+    )
+
     return parser.parse_args()
 
 

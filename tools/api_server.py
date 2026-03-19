@@ -88,6 +88,11 @@ class API(ExceptionHandler):
             llama_checkpoint_path=self.args.llama_checkpoint_path,
             decoder_checkpoint_path=self.args.decoder_checkpoint_path,
             decoder_config_name=self.args.decoder_config_name,
+            rpc_enable=self.args.rpc_enable,
+            rpc_role=self.args.rpc_role,
+            rpc_host_address=self.args.rpc_host_address,
+            rpc_vm_address=self.args.rpc_vm_address,
+            rpc_num_host_layers=self.args.rpc_num_host_layers,
         )
 
         logger.info(f"Startup done, listening server at http://{self.args.listen}")
