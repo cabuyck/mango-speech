@@ -15,6 +15,7 @@ Message types (opcodes):
     - CLOSE_SESSION: Clean up session resources
 """
 
+import socket
 import struct
 from dataclasses import dataclass
 from enum import StrEnum
@@ -469,7 +470,3 @@ def send_message(sock: socket.socket, header: dict, payload: Optional[bytes] = N
     """
     message = encode_message(header, payload)
     sock.sendall(message)
-
-
-# Import at module level for convenience
-import socket
