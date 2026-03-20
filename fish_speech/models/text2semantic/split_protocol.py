@@ -142,7 +142,7 @@ def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
     """
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
-    return memoryview(tensor).tobytes()
+    return tensor.detach().cpu().numpy().tobytes()
 
 
 def bytes_to_tensor(

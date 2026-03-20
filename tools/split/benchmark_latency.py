@@ -49,7 +49,7 @@ def decode_message(data: bytes) -> Tuple[dict, bytes]:
 
 def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
     """Convert tensor to bytes for network transmission."""
-    return memoryview(tensor.contiguous()).tobytes()
+    return tensor.detach().cpu().numpy().tobytes()
 
 
 def bytes_to_tensor(data: bytes, dtype: str, shape: Tuple[int, ...]) -> torch.Tensor:
