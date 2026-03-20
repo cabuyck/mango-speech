@@ -988,8 +988,8 @@ class Attention(nn.Module):
         self.kv_cache = None
 
         if config.attention_qk_norm:
-            self.q_norm = nn.RMSNorm(config.head_dim, config.norm_eps)
-            self.k_norm = nn.RMSNorm(config.head_dim, config.norm_eps)
+            self.q_norm = RMSNorm(config.head_dim, config.norm_eps)
+            self.k_norm = RMSNorm(config.head_dim, config.norm_eps)
 
         self.dropout = config.dropout
         self.n_head = config.n_head
