@@ -31,7 +31,22 @@ if hasattr(torch._inductor.config, "fx_graph_cache"):
     torch._inductor.config.fx_graph_cache = True
 
 
-from torch.nn.attention import SDPBackend, sdpa_kernel
+# Compatibility layer for PyTorch 2.2.x (vs 2.8+)
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:
+    # PyTorch 2.2.x compatibility: sdpa_kernel doesn't exist
+    # Create a no-op context manager as fallback
+    class SDPBackend:
+        FLASH_ATTENTION = "flash_attention"
+        MATH = "math"
+        EFFICIENT_ATTENTION = "efficient_attention"
+
+    from contextlib import nullcontext
+
+    def sdpa_kernel(backend):
+        """No-op fallback for older PyTorch versions."""
+        return nullcontext()
 
 from fish_speech.models.text2semantic.llama import (
     BaseTransformer,

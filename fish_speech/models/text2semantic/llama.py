@@ -2,6 +2,7 @@ import dataclasses
 import json
 import math
 from collections import OrderedDict
+from collections.abc import ContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,8 +13,24 @@ from einops import rearrange
 from loguru import logger
 from torch import Tensor
 from torch.nn import functional as F
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.checkpoint import checkpoint
+
+# Compatibility layer for PyTorch 2.2.x (vs 2.8+)
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:
+    # PyTorch 2.2.x compatibility: sdpa_kernel doesn't exist
+    # Create a no-op context manager as fallback
+    class SDPBackend:
+        FLASH_ATTENTION = "flash_attention"
+        MATH = "math"
+        EFFICIENT_ATTENTION = "efficient_attention"
+
+    from contextlib import nullcontext
+
+    def sdpa_kernel(backend):
+        """No-op fallback for older PyTorch versions."""
+        return nullcontext()
 
 from fish_speech.models.text2semantic.lora import LoraConfig, setup_lora
 
