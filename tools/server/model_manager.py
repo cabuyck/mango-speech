@@ -18,14 +18,27 @@ class ModelManager:
         llama_checkpoint_path: str,
         decoder_checkpoint_path: str,
         decoder_config_name: str,
+        split_mode: str = "disabled",
+        remote_worker: str = None,
+        split_dtype: str = "float16",
     ) -> None:
 
         self.mode = mode
         self.device = device
         self.half = half
         self.compile = compile
+        self.split_mode = split_mode
+        self.remote_worker = remote_worker
+        self.split_dtype = split_dtype
 
-        self.precision = torch.half if half else torch.bfloat16
+        # Precision handling for split mode
+        if split_mode != "disabled":
+            self.precision = torch.half if split_dtype == "float16" else torch.float32
+            if compile:
+                logger.warning("Compile is disabled in split mode")
+                self.compile = False
+        else:
+            self.precision = torch.half if half else torch.bfloat16
 
         # Check if MPS or CUDA is available
         if torch.backends.mps.is_available():
@@ -37,7 +50,13 @@ class ModelManager:
 
         # Load the TTS models
         self.load_llama_model(
-            llama_checkpoint_path, self.device, self.precision, self.compile, self.mode
+            llama_checkpoint_path,
+            self.device,
+            self.precision,
+            self.compile,
+            self.mode,
+            split_mode,
+            remote_worker,
         )
         self.load_decoder_model(
             decoder_config_name, decoder_checkpoint_path, self.device
@@ -54,10 +73,28 @@ class ModelManager:
             self.warm_up(self.tts_inference_engine)
 
     def load_llama_model(
-        self, checkpoint_path, device, precision, compile, mode
+        self,
+        checkpoint_path,
+        device,
+        precision,
+        compile,
+        mode,
+        split_mode="disabled",
+        remote_worker=None,
     ) -> None:
 
         if mode == "tts":
+            # Split mode handling
+            if split_mode == "slow_full_remote":
+                if remote_worker is None:
+                    raise ValueError("--remote-worker is required when split-mode is enabled")
+                if ":" not in remote_worker:
+                    raise ValueError("--remote-worker must be in format 'host:port'")
+                logger.info(f"Using split mode with remote worker at {remote_worker}")
+
+            # TODO: Pass split mode args to launch_thread_safe_queue
+            # For now, split mode via API server requires additional changes
+            # to the inference engine
             self.llama_queue = launch_thread_safe_queue(
                 checkpoint_path=checkpoint_path,
                 device=device,

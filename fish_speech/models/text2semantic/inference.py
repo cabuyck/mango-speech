@@ -93,6 +93,129 @@ def sample(
     return idx_next, probs
 
 
+def slow_step(
+    model: DualARTransformer,
+    x: torch.Tensor,
+    input_pos: torch.Tensor,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: int,
+    semantic_logit_bias: torch.Tensor,
+    audio_masks: torch.Tensor,
+    audio_parts: torch.Tensor,
+    previous_tokens: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+    """
+    Execute slow AR step: generate semantic token.
+
+    Extracted from lines 108-145 of decode_one_token_ar().
+
+    Returns:
+        (semantic_token, hidden_state, probs, eos)
+    """
+    forward_result = model.forward_generate(
+        x,
+        input_pos,
+        audio_masks=audio_masks,
+        audio_parts=audio_parts,
+    )
+    logits = forward_result.logits  # (1, 1, vocab_size)
+    hidden_states = forward_result.hidden_states
+
+    # Apply constrained decoding: only allow semantic tokens + im_end
+    biased_logits = logits + semantic_logit_bias
+
+    # Normal sample
+    main_token_normal = sample(
+        biased_logits, temperature=temperature, top_p=top_p, top_k=top_k
+    )[0]
+
+    # RAS: also sample with high temp to use as fallback if token repeats
+    high_temp = torch.tensor(
+        RAS_HIGH_TEMP, device=temperature.device, dtype=temperature.dtype
+    )
+    high_top_p = torch.tensor(RAS_HIGH_TOP_P, device=top_p.device, dtype=top_p.dtype)
+    main_token_high = sample(
+        biased_logits, temperature=high_temp, top_p=high_top_p, top_k=top_k
+    )[0]
+
+    # Use high-temp sample if: token is semantic AND token is in previous window
+    semantic_token = main_token_normal
+    eos = False
+
+    if previous_tokens is not None:
+        in_window = (previous_tokens[0] == main_token_normal).any()
+        is_semantic = (main_token_normal >= model.config.semantic_begin_id) & (
+            main_token_normal <= model.config.semantic_end_id
+        )
+        should_use_high = in_window & is_semantic
+        semantic_token = torch.where(
+            should_use_high, main_token_high, main_token_normal
+        )
+
+    # Check for EOS
+    from fish_speech.tokenizer import IM_END_TOKEN
+
+    im_end_id = model.tokenizer.get_token_id(IM_END_TOKEN)
+    eos = semantic_token.item() == im_end_id
+
+    return semantic_token, hidden_states, biased_logits, eos
+
+
+def fast_step(
+    model: DualARTransformer,
+    hidden_states: torch.Tensor,
+    semantic_token: int,
+    temperature: torch.Tensor,
+    top_p: torch.Tensor,
+    top_k: int,
+) -> torch.Tensor:
+    """
+    Execute fast AR step: generate all 10 codebook tokens.
+
+    Extracted from lines 148-176 of decode_one_token_ar().
+
+    Returns:
+        codebooks.T - shape (num_codebooks+1, 1)
+    """
+    codebooks = [semantic_token]
+
+    input_pos = torch.tensor([0], device=hidden_states.device, dtype=torch.long)
+    model.forward_generate_fast(hidden_states, input_pos)
+
+    a = codebooks[0] - model.config.semantic_begin_id
+    a = torch.clamp(a, min=0, max=model.config.codebook_size - 1)
+
+    hidden_states = model.fast_embeddings(a)
+    codebooks.append(a)
+
+    for codebook_idx in range(1, model.config.num_codebooks):
+        input_pos = torch.tensor(
+            [codebook_idx], device=hidden_states.device, dtype=torch.long
+        )
+        logits = model.forward_generate_fast(hidden_states, input_pos)
+
+        short_logits = logits  # DualAR predicts config.codebook_size number of tokens
+
+        # Convert logits to probs (no constrain for fast codebooks)
+        a = sample(
+            short_logits,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+        )[0]
+
+        hidden_states = model.fast_embeddings(a)
+        codebooks.append(a)
+
+    codebooks = torch.stack(codebooks, dim=1)
+
+    # Only delete references, let Python GC handle cleanup
+    del logits, hidden_states
+
+    return codebooks.T
+
+
 def decode_one_token_ar(
     model: DualARTransformer,
     x: torch.Tensor,
@@ -179,6 +302,50 @@ def decode_one_token_ar(
     del logits, hidden_states, forward_result
 
     return codebooks.T
+
+
+def decode_one_token_with_backends(
+    slow_backend,
+    fast_backend,
+    sampling_config: dict,
+    session_id: int,
+    x: torch.Tensor,
+    input_pos: torch.Tensor,
+    previous_tokens: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Decode one token using slow/fast backends for split mode.
+
+    This wraps the backend interface to match the signature of decode_one_token_ar.
+
+    Args:
+        slow_backend: SlowARBackend instance (local or remote)
+        fast_backend: FastARBackend instance
+        sampling_config: Sampling parameters dict
+        session_id: Active session ID
+        x: Input token tensor
+        input_pos: Input position
+        previous_tokens: Previous tokens for RAS
+
+    Returns:
+        codebooks.T - same shape as decode_one_token_ar
+    """
+    # Get semantic token from slow backend
+    if previous_tokens is None or not hasattr(slow_backend, "_sessions"):
+        # First token - use start_session
+        result = slow_backend.start_session(x, sampling_config)
+    else:
+        # Subsequent tokens - use step
+        result = slow_backend.step(session_id, x, input_pos.item())
+
+    semantic_token = result.semantic_token
+    hidden_state = result.hidden_state
+    eos = result.eos
+
+    # Get codebooks from fast backend
+    codebooks = fast_backend.decode_from_semantic(hidden_state, semantic_token, sampling_config)
+
+    return codebooks
 
 
 def decode_n_tokens(
@@ -357,6 +524,63 @@ def generate(
     del first_token, x, prompt, empty, input_pos
 
     return seq
+
+
+def init_model_with_split(
+    checkpoint_path,
+    device,
+    precision,
+    compile=False,
+    split_mode="disabled",
+    remote_worker=None,
+):
+    """
+    Initialize model with optional split mode support.
+
+    Args:
+        checkpoint_path: Path to model checkpoint
+        device: Device to load on
+        precision: Data type (torch.float16 or torch.bfloat16)
+        compile: Whether to compile (ignored in split mode)
+        split_mode: "disabled" or "slow_full_remote"
+        remote_worker: "host:port" for remote worker
+
+    Returns:
+        (model, slow_backend, fast_backend)
+    """
+    from fish_speech.models.text2semantic.backends import (
+        FastARBackend,
+        LocalSlowARBackend,
+        RemoteSlowARBackend,
+    )
+
+    if split_mode == "slow_full_remote":
+        # Load only fast AR on host
+        logger.info(f"Loading fast AR only on {device} (split mode)")
+        model = DualARTransformer.load_fast_only(
+            str(checkpoint_path), device, precision
+        )
+
+        # Parse remote worker address
+        host, port_str = remote_worker.split(":")
+        port = int(port_str)
+
+        # Create remote backend
+        slow_backend = RemoteSlowARBackend(host, port, device)
+        logger.info(f"Using remote slow AR backend at {remote_worker}")
+
+        # Create fast backend
+        fast_backend = FastARBackend(model, device)
+
+    else:
+        # Load full model locally
+        model, _ = init_model(checkpoint_path, device, precision, compile=compile)
+
+        # Create local backends for compatibility
+        slow_backend = LocalSlowARBackend(model, device)
+        fast_backend = FastARBackend(model, device)
+
+    return model, slow_backend, fast_backend
 
 
 def init_model(checkpoint_path, device, precision, compile=False):
@@ -836,6 +1060,24 @@ def launch_thread_safe_queue(
 @click.option("--iterative-prompt/--no-iterative-prompt", default=True)
 @click.option("--chunk-length", type=int, default=300)
 @click.option("--output-dir", type=Path, default="output")
+@click.option(
+    "--split-mode",
+    type=click.Choice(["disabled", "slow_full_remote"], case_sensitive=False),
+    default="disabled",
+    help="Enable split execution mode (default: disabled)",
+)
+@click.option(
+    "--remote-worker",
+    type=str,
+    default=None,
+    help="Remote worker address for split mode (e.g., 192.168.122.10:50061)",
+)
+@click.option(
+    "--split-dtype",
+    type=click.Choice(["float16", "float32"], case_sensitive=False),
+    default="float16",
+    help="Data type for split mode (default: float16 for 1080 Ti compatibility)",
+)
 def main(
     text: str,
     prompt_text: Optional[tuple[str, ...]],
@@ -855,9 +1097,28 @@ def main(
     iterative_prompt: bool,
     chunk_length: int,
     output_dir: Path,
+    split_mode: str,
+    remote_worker: Optional[str],
+    split_dtype: str,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     precision = torch.half if half else torch.bfloat16
+
+    # Split mode validation
+    if split_mode != "disabled":
+        if remote_worker is None:
+            raise ValueError("--remote-worker is required when split-mode is enabled")
+        if ":" not in remote_worker:
+            raise ValueError("--remote-worker must be in format 'host:port'")
+        # Disable compile in split mode
+        if compile:
+            logger.warning("Compile is disabled in split mode")
+            compile = False
+        # Use split dtype if specified
+        if split_dtype == "float16":
+            precision = torch.half
+        else:
+            precision = torch.float32
 
     if prompt_text and not prompt_audio and not prompt_tokens:
         raise ValueError(
@@ -874,15 +1135,89 @@ def main(
 
     logger.info("Loading model ...")
     t0 = time.time()
-    model, decode_one_token = init_model(
-        checkpoint_path, device, precision, compile=compile
-    )
-    with torch.device(device):
-        model.setup_caches(
-            max_batch_size=1,
-            max_seq_len=model.config.max_seq_len,
-            dtype=next(model.parameters()).dtype,
+
+    # Use different initialization for split mode
+    if split_mode != "disabled":
+        model, slow_backend, fast_backend = init_model_with_split(
+            checkpoint_path, device, precision, compile=False,
+            split_mode=split_mode, remote_worker=remote_worker
         )
+        # For split mode, create a wrapper decode function
+        sampling_config = {
+            "temperature": torch.tensor(temperature, device=device, dtype=precision),
+            "top_p": torch.tensor(top_p, device=device, dtype=precision),
+            "top_k": top_k,
+        }
+
+        # Container for shared state across calls
+        class SplitDecodeState:
+            def __init__(self):
+                self.session_id = 0
+                self.started = False
+                self.previous_tokens = torch.zeros(
+                    (model.config.num_codebooks + 1, 10),
+                    dtype=torch.int,
+                    device=device,
+                )
+
+        decode_state = SplitDecodeState()
+
+        def decode_one_token_with_backends_wrapper(*args, **kwargs):
+            """Wrapper that uses backends for split mode."""
+            # Extract parameters (args[0] is model, args[1] is x, args[2] is input_pos)
+            model_arg = args[0] if len(args) > 0 else kwargs.get('model')
+            x = args[1] if len(args) > 1 else kwargs.get('x')
+            input_pos = args[2] if len(args) > 2 else kwargs.get('input_pos')
+            previous_tokens = kwargs.get('previous_tokens', decode_state.previous_tokens)
+
+            # Start session on first call
+            if not decode_state.started:
+                result = slow_backend.start_session(x, sampling_config)
+                decode_state.started = True
+                decode_state.session_id = result.semantic_token  # Use first token as temp ID
+            else:
+                result = slow_backend.step(
+                    decode_state.session_id,
+                    x, input_pos
+                )
+
+            # Check EOS
+            if result.eos:
+                # Return a codebook with EOS token
+                from fish_speech.tokenizer import IM_END_TOKEN
+                im_end_id = model_arg.tokenizer.get_token_id(IM_END_TOKEN)
+                eos_tensor = torch.full((model_arg.config.num_codebooks + 1, 1), im_end_id,
+                                        dtype=torch.long, device=device)
+                return eos_tensor
+
+            # Generate fast AR codebooks
+            codebooks = fast_backend.decode_from_semantic(
+                result.hidden_state, result.semantic_token, sampling_config
+            )
+
+            # Update RAS window
+            decode_state.previous_tokens = decode_state.previous_tokens.roll(-1, dims=1)
+            decode_state.previous_tokens[:, -1] = result.semantic_token
+
+            return codebooks
+
+        decode_one_token = decode_one_token_with_backends_wrapper
+    else:
+        model, decode_one_token = init_model(
+            checkpoint_path, device, precision, compile=compile
+        )
+        slow_backend = None
+        fast_backend = None
+
+    with torch.device(device):
+        if split_mode == "disabled":
+            model.setup_caches(
+                max_batch_size=1,
+                max_seq_len=model.config.max_seq_len,
+                dtype=next(model.parameters()).dtype,
+            )
+        # In split mode, fast backend handles its own cache setup
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 

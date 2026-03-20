@@ -40,6 +40,28 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--api-key", type=str, default=None)
 
+    # Split mode arguments
+    parser.add_argument(
+        "--split-mode",
+        type=str,
+        choices=["disabled", "slow_full_remote"],
+        default="disabled",
+        help="Enable split execution mode (default: disabled)",
+    )
+    parser.add_argument(
+        "--remote-worker",
+        type=str,
+        default=None,
+        help="Remote worker address for split mode (e.g., 192.168.122.10:50061)",
+    )
+    parser.add_argument(
+        "--split-dtype",
+        type=str,
+        choices=["float16", "float32"],
+        default="float16",
+        help="Data type for split mode (default: float16 for 1080 Ti compatibility)",
+    )
+
     return parser.parse_args()
 
 

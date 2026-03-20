@@ -1,0 +1,34 @@
+# Split Mode Configuration for Fish Speech
+#
+# This configuration enables distributed inference across two GPUs:
+# - Slow AR (4B params) runs on remote VM (e.g., 1080 Ti, 11GB)
+# - Fast AR (400M params) + DAC codec run on local host (e.g., 5060 Ti, 16GB)
+#
+# Usage:
+#   python fish_speech/models/text2semantic/inference.py \
+#     --config-name split_mode \
+#     --split-mode slow_full_remote \
+#     --remote-worker 192.168.122.10:50061
+
+# Split mode settings
+split_mode:
+  enabled: true
+  mode: "slow_full_remote"  # Options: "disabled", "slow_full_remote"
+  remote_worker: "192.168.122.10:50061"  # VM worker address (host:port)
+  dtype: "float16"  # fp16 required for 1080 Ti compatibility
+  compile: false  # Always false in split mode (cross-process + compile = nightmare)
+  max_concurrent_requests: 1  # Single session at a time in v1
+
+# Override base settings for split mode
+compile: false
+precision: "fp16"  # Use fp16 on both sides for consistency
+
+# Sampling parameters (can be overridden via CLI)
+temperature: 1.0
+top_p: 0.9
+top_k: 30
+
+# Generation settings
+max_new_tokens: 0  # 0 = generate until EOS or max_seq_len
+iterative_prompt: true
+chunk_length: 512  # Maximum UTF-8 bytes per chunk when splitting long text

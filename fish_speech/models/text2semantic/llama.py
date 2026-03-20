@@ -826,6 +826,119 @@ class DualARTransformer(BaseTransformer):
         x.hidden_states = self.fast_project_in(x.hidden_states)
         return x
 
+    @classmethod
+    def load_slow_only(
+        cls,
+        checkpoint_path: str,
+        device: str,
+        dtype: torch.dtype = torch.float16,
+    ) -> "DualARTransformer":
+        """
+        Load only the slow AR components for split mode (VM side).
+
+        Loads:
+            - Token embeddings
+            - Codebook embeddings
+            - All slow layers (36 layers for 4B model)
+            - Slow norm
+            - Slow LM head
+
+        Does NOT load (deleted after full load):
+            - Fast layers (4 layers)
+            - Fast project_in
+            - Fast embeddings
+            - Fast norm
+            - Fast output
+
+        Args:
+            checkpoint_path: Path to model checkpoint
+            device: Device to load on (e.g., "cuda:0")
+            dtype: Data type (float16 for 1080 Ti compatibility)
+
+        Returns:
+            Model with only slow AR components
+        """
+        from loguru import logger
+
+        logger.info(f"Loading full model from {checkpoint_path}")
+        model = cls.from_pretrained(checkpoint_path, load_weights=True)
+
+        # Delete fast AR components to save VRAM
+        logger.info("Deleting fast AR components")
+        delattr(model, "fast_project_in")
+        delattr(model, "fast_embeddings")
+        delattr(model, "fast_layers")
+        delattr(model, "fast_norm")
+        delattr(model, "fast_output")
+        delattr(model, "fast_freqs_cis")
+
+        # Move to device with specified dtype
+        model = model.to(device=device, dtype=dtype)
+        model.eval()
+
+        logger.info(f"Slow AR model loaded on {device} with dtype {dtype}")
+        return model
+
+    @classmethod
+    def load_fast_only(
+        cls,
+        checkpoint_path: str,
+        device: str,
+        dtype: torch.dtype = torch.float16,
+    ) -> "DualARTransformer":
+        """
+        Load only the fast AR components for split mode (host side).
+
+        Loads:
+            - Fast project_in (if dim != fast_dim)
+            - Fast embeddings
+            - Fast layers (4 layers)
+            - Fast norm
+            - Fast output
+            - Fast freqs_cis
+
+        Does NOT load (deleted after full load):
+            - Token embeddings
+            - Codebook embeddings
+            - All slow layers (36 layers)
+            - Slow norm
+            - Slow output
+            - Slow freqs_cis
+            - Causal mask (not needed for fast AR)
+
+        Args:
+            checkpoint_path: Path to model checkpoint
+            device: Device to load on (e.g., "cuda:0")
+            dtype: Data type (float16 for compatibility)
+
+        Returns:
+            Model with only fast AR components
+        """
+        from loguru import logger
+
+        logger.info(f"Loading full model from {checkpoint_path}")
+        model = cls.from_pretrained(checkpoint_path, load_weights=True)
+
+        # Delete slow AR components to save VRAM
+        logger.info("Deleting slow AR components")
+        delattr(model, "embeddings")
+        delattr(model, "codebook_embeddings")
+        delattr(model, "layers")
+        delattr(model, "norm")
+
+        if hasattr(model, "output"):
+            delattr(model, "output")
+
+        delattr(model, "freqs_cis")
+        delattr(model, "causal_mask")
+
+        # Move to device with specified dtype
+        model = model.to(device=device, dtype=dtype)
+        model.eval()
+
+        logger.info(f"Fast AR model loaded on {device} with dtype {dtype}")
+        return model
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, config: BaseModelArgs, use_sdpa: bool = True) -> None:
