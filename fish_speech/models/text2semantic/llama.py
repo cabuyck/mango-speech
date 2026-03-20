@@ -2,7 +2,6 @@ import dataclasses
 import json
 import math
 from collections import OrderedDict
-from collections.abc import ContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
